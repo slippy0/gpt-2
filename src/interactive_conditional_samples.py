@@ -5,17 +5,19 @@ import json
 import os
 import numpy as np
 import tensorflow as tf
-
+import mdv
+import html
 import model, sample, encoder
+mdv.term_columns = 60
 
 def interact_model(
-    model_name='117M',
+    model_name='checkpoint/writingprompts-bigbatch',
     seed=None,
-    nsamples=1,
+    nsamples=2,
     batch_size=1,
     length=None,
     temperature=1,
-    top_k=0,
+    top_k=40,
 ):
     """
     Interactively run the model
@@ -39,9 +41,10 @@ def interact_model(
         batch_size = 1
     assert nsamples % batch_size == 0
 
-    enc = encoder.get_encoder(model_name)
+    hpdir = '117M'
+    enc = encoder.get_encoder(hpdir)
     hparams = model.default_hparams()
-    with open(os.path.join('models', model_name, 'hparams.json')) as f:
+    with open(os.path.join('models', hpdir, 'hparams.json')) as f:
         hparams.override_from_dict(json.load(f))
 
     if length is None:
@@ -49,7 +52,9 @@ def interact_model(
     elif length > hparams.n_ctx:
         raise ValueError("Can't get samples longer than window size: %s" % hparams.n_ctx)
 
-    with tf.Session(graph=tf.Graph()) as sess:
+    with tf.Session(graph=tf.Graph(), config=tf.ConfigProto(
+        device_count = {'GPU': 0}
+    )) as sess:
         context = tf.placeholder(tf.int32, [batch_size, None])
         np.random.seed(seed)
         tf.set_random_seed(seed)
@@ -69,7 +74,7 @@ def interact_model(
             while not raw_text:
                 print('Prompt should not be empty!')
                 raw_text = input("Model prompt >>> ")
-            context_tokens = enc.encode(raw_text)
+            context_tokens = enc.encode(raw_text.replace('\\n', '\n'))
             generated = 0
             for _ in range(nsamples // batch_size):
                 out = sess.run(output, feed_dict={
@@ -78,10 +83,14 @@ def interact_model(
                 for i in range(batch_size):
                     generated += 1
                     text = enc.decode(out[i])
-                    print("=" * 40 + " SAMPLE " + str(generated) + " " + "=" * 40)
-                    print(text)
+                    print("=" * 40 + " PROMPT " + "=" * 40)
+                    print(raw_text)
+                    print("=" * 40 + " SAMPLE " + str(generated) +  " " + "=" * 40)
+                    print()
+                    print((html.unescape(text)))
             print("=" * 80)
+
+            #print("=" * 80)
 
 if __name__ == '__main__':
     fire.Fire(interact_model)
-

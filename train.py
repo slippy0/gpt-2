@@ -9,10 +9,19 @@ import tensorflow as tf
 import random
 import time
 
-import model, sample, encoder
+import model
+import sample
+import encoder
+from tqdm import tqdm
+from sacred import Experiment
+from sacred.observers import MongoObserver
 
 CHECKPOINT_DIR = 'checkpoint'
 SAMPLE_DIR = 'samples'
+
+ex = Experiment('gpt-2-finetune-tf')
+
+ex.observers.append(MongoObserver.create(url='localhost:27017', db_name='experiments'))
 
 
 def maketree(path):
@@ -90,17 +99,36 @@ class Sampler(object):
                 return self.chunks[i][within_chunk:within_chunk + length]
 
 
-def train_main(dataset,
-               model_name='117M',
-               seed=None,
-               batch_size=1,
-               sample_length=1023,
-               sample_num=1,
-               sample_every=100,
-               run_name='run1',
-               restore_from='latest',
-               save_every=1000):
+@ex.config
+def config():
+    dataset = 'data-fine2'
+    model_name = '117M'
+    batch_size = 2
+    sample_length = 1024 - 1
+    sample_num = 1
+    sample_every = 100
+    run_name = 'writingprompts-bigbatch'
+    restore_from = 'latest'
+    save_every = 1000
+    learning_rate = 1e-5
 
+    grad_accum = 256
+
+
+@ex.main
+def train_main(_run,
+               dataset,
+               model_name,
+               batch_size,
+               sample_length,
+               sample_num,
+               sample_every,
+               run_name,
+               restore_from,
+               save_every,
+               learning_rate,
+               grad_accum):
+    seed = 3131
     enc = encoder.get_encoder(model_name)
     hparams = model.default_hparams()
     with open(os.path.join('models', model_name, 'hparams.json')) as f:
@@ -132,14 +160,21 @@ def train_main(dataset,
             top_k=40)
 
         train_vars = [v for v in tf.trainable_variables() if 'model' in v.name]
-        opt = tf.train.AdamOptimizer().minimize(loss, var_list=train_vars)
+        opt = tf.train.AdamOptimizer(
+            learning_rate=learning_rate)#.minimize(loss, var_list=train_vars)
+
+        tvs = train_vars
+        accum_vars = [tf.Variable(tf.zeros_like(tv.initialized_value()), trainable=False) for tv in tvs]
+        zero_ops = [tv.assign(tf.zeros_like(tv)) for tv in accum_vars]
+        gvs = opt.compute_gradients(loss, tvs)
+        accum_ops = [accum_vars[i].assign_add(gv[0]) for i, gv in enumerate(gvs)]
+        train_step = opt.apply_gradients([(accum_vars[i], gv[1]) for i, gv in enumerate(gvs)])
 
         saver = tf.train.Saver(
             var_list=train_vars,
             max_to_keep=5,
             keep_checkpoint_every_n_hours=2)
         sess.run(tf.global_variables_initializer())
-
         if restore_from == 'latest':
             ckpt = tf.train.latest_checkpoint(
                 os.path.join(CHECKPOINT_DIR, run_name))
@@ -154,9 +189,9 @@ def train_main(dataset,
             ckpt = tf.train.latest_checkpoint(restore_from)
         print('Loading checkpoint', ckpt)
         saver.restore(sess, ckpt)
-
         print('Loading dataset...')
         chunks = load_dataset(enc, dataset)
+    #    np.savez('wpdata.npz', chunks)
         data_sampler = Sampler(chunks)
         print('dataset has', data_sampler.total_size, 'tokens')
         print('Training...')
@@ -187,8 +222,8 @@ def train_main(dataset,
             all_text = []
             for i in range(sample_num):
                 out = sess.run(
-                    tf_sample, feed_dict={context: [data_sampler.sample(1)]})
-                text = enc.decode(out[0])
+                    tf_sample, feed_dict={context: [data_sampler.sample(sample_length) for _ in range(batch_size)]})
+                text = enc.decode(out[0][:sample_length]) + "\n\n======== END PROMPT ========\n\n" + enc.decode(out[0][sample_length:])
                 all_text.append('======== SAMPLE {} ========'.format(i + 1))
                 all_text.append(text)
                 all_text.append('')
@@ -208,10 +243,16 @@ def train_main(dataset,
                     save()
                 if counter % sample_every == 0:
                     generate_samples()
-
-                batch = [data_sampler.sample(1024) for _ in range(batch_size)]
-
-                _, lv = sess.run((opt, loss), feed_dict={context: batch})
+                sess.run(zero_ops)
+#                print([x.shape for x in batch])
+                mlv = 0
+                for i in tqdm(range(grad_accum)):
+                    batch = [data_sampler.sample(sample_length) for _ in range(batch_size)]
+                    _, lv = sess.run((accum_ops, loss), feed_dict={context: batch})
+                    mlv += lv
+                sess.run(train_step)
+                mlv /= grad_accum
+                lv = mlv
 
                 avg_loss = (avg_loss[0] * 0.99 + lv, avg_loss[1] * 0.99 + 1.0)
 
@@ -222,6 +263,7 @@ def train_main(dataset,
                         time=time.time() - start_time,
                         loss=lv,
                         avg=avg_loss[0] / avg_loss[1]))
+                _run.log_scalar('loss', lv, counter)
 
                 counter += 1
         except KeyboardInterrupt:
@@ -230,4 +272,4 @@ def train_main(dataset,
 
 
 if __name__ == '__main__':
-    fire.Fire(train_main)
+    ex.run_commandline()
