@@ -9,11 +9,18 @@ import numpy as np
 import tensorflow as tf
 import time
 from tensorflow.core.protobuf import rewriter_config_pb2
+from sacred import Experiment
+from sacred.observers import MongoObserver
 
 import model, sample, encoder
 from load_dataset import load_dataset, Sampler
 from accumulate import AccumulatingOptimizer
 import memory_saving_gradients
+
+ex = Experiment('gpt2-345M-finetune-tf')
+
+ex.observers.append(MongoObserver.create(url='localhost:27017', db_name='experiments'))
+
 
 CHECKPOINT_DIR = 'checkpoint'
 SAMPLE_DIR = 'samples'
@@ -40,6 +47,7 @@ parser.add_argument('--sample_length', metavar='TOKENS', type=int, default=1023,
 parser.add_argument('--sample_num', metavar='N', type=int, default=1, help='Generate this many samples')
 parser.add_argument('--save_every', metavar='N', type=int, default=1000, help='Write a checkpoint every N steps')
 
+ex.add_config(vars(parser.parse_args()))
 
 def maketree(path):
     try:
@@ -48,7 +56,8 @@ def maketree(path):
         pass
 
 
-def main():
+@ex.main
+def main(_run):
     args = parser.parse_args()
     enc = encoder.get_encoder(args.model_name)
     hparams = model.default_hparams()
@@ -211,7 +220,7 @@ def main():
                         time=time.time() - start_time,
                         loss=v_loss,
                         avg=avg_loss[0] / avg_loss[1]))
-
+                _run.log_scalar('loss', v_loss, counter)
                 counter += 1
         except KeyboardInterrupt:
             print('interrupted')
@@ -219,4 +228,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    ex.run()
