@@ -6,7 +6,7 @@ import tensorflow as tf
 import tqdm
 
 
-def load_dataset(enc, path, combine):
+def data_paths(path):
     paths = []
     if os.path.isfile(path):
         # Simple file
@@ -19,15 +19,23 @@ def load_dataset(enc, path, combine):
     else:
         # Assume glob
         paths = glob.glob(path)
+    return paths
 
+
+def load_dataset(enc, paths, combine):
     token_chunks = []
+    indices = []
     raw_text = ''
+    i = 0
     for path in tqdm.tqdm(paths):
+        indices.append([])
         if path.endswith('.npz'):
             # Pre-encoded
             with np.load(path) as npz:
                 for item in npz.files:
                     token_chunks.append(npz[item])
+                    indices[-1].append(i)
+                    i += 1
         else:
             # Plain text
             with open(path, 'r') as fp:
@@ -35,13 +43,18 @@ def load_dataset(enc, path, combine):
             if len(raw_text) >= combine:
                 tokens = np.stack(enc.encode(raw_text))
                 token_chunks.append(tokens)
+                indices[-1].append(i)
+                i += 1
+
                 raw_text = ''
             else:
                 raw_text += '<|endoftext|>'
     if raw_text:
         tokens = np.stack(enc.encode(raw_text))
         token_chunks.append(tokens)
-    return token_chunks
+        indices[-1].append(i)
+        i += 1
+    return token_chunks, indices
 
 
 def binary_search(f, lo, hi):
@@ -62,12 +75,54 @@ class Sampler(object):
     'Fairly' means that the distribution is the same as sampling from one concatenated chunk,
     but without crossing chunk boundaries."""
 
-    def __init__(self, chunks):
+    def __init__(self, enc, combine, path, perm_path, num_simultaneous_files=5):
+        self.enc = enc
+        self.combine = combine
+        print('Loading perma dataset')
+        self.permchunks, _ = load_dataset(enc, data_paths(perm_path), combine)
+        self.num_simultaneous_files = num_simultaneous_files
+
+        print('Loading cycling dataset')
+        self.paths = data_paths(path)
+        self.chunks, self.chunkindices = load_dataset(enc, self.paths[:num_simultaneous_files], combine)
+        self.cycleindex = 0
+        print('Paths loaded:', self.paths[:num_simultaneous_files])
+
+        self.set_chunks(self.chunks)
+
+    def set_chunks(self, chunks):
+        chunks.extend(self.permchunks)
         self.chunks = chunks
         self.total_size = sum(chunk.shape[0] for chunk in chunks)
         self.boundaries = [0]
         for i in range(len(chunks)):
             self.boundaries.append(self.boundaries[-1] + chunks[i].shape[0])
+
+    def cycle_files(self):
+        if len(self.paths) - len(self.chunkindices) == 0:
+            # can't cycle :(
+            return
+        self.chunks = self.chunks[:self.chunkindices[-1][-1]]
+
+        # unload first file
+        del self.chunks[self.chunkindices[0][0]:self.chunkindices[0][-1]]
+
+        del self.chunkindices[0]
+        print('Unloaded file {}'.format(self.paths[self.cycleindex]))
+
+        sidx = self.cycleindex + len(self.chunkindices) + 1
+
+        sidx %= len(self.paths)
+
+        print('Loading file {}'.format(self.paths[sidx]))
+        nc, ncis = load_dataset(self.enc, [self.paths[sidx]], self.combine)
+
+        self.chunks.extend(nc)
+        self.chunkindices.extend(ncis)
+
+        self.cycleindex += 1
+        self.cycleindex %= len(self.paths)
+        self.set_chunks(self.chunks)
 
     def sample(self, length):
         assert length < self.total_size // len(
