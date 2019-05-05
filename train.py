@@ -30,7 +30,7 @@ parser = argparse.ArgumentParser(
     description='Fine-tune GPT-2 on your custom dataset.',
     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-parser.add_argument('--dataset', metavar='PATH', type=str, required=True, help='Input file, directory, or glob pattern (utf-8 text, or preencoded .npz files).')
+parser.add_argument('--dataset', metavar='PATH', type=str, required=False, help='Input file, directory, or glob pattern (utf-8 text, or preencoded .npz files).')
 parser.add_argument('--perm_dataset', metavar='PATH', type=str, required=False, help='Non-cycled input data. Input file, directory, or glob pattern (utf-8 text, or preencoded .npz files).')
 parser.add_argument('--model_name', metavar='MODEL', type=str, default='117M', help='Pretrained model name')
 parser.add_argument('--combine', metavar='CHARS', type=int, default=50000, help='Concatenate input files with <|endoftext|> separator into chunks of this minimum size')
@@ -47,6 +47,7 @@ parser.add_argument('--sample_every', metavar='N', type=int, default=100, help='
 parser.add_argument('--sample_length', metavar='TOKENS', type=int, default=1023, help='Sample this many tokens')
 parser.add_argument('--sample_num', metavar='N', type=int, default=1, help='Generate this many samples')
 parser.add_argument('--save_every', metavar='N', type=int, default=1000, help='Write a checkpoint every N steps')
+parser.add_argument('--cycle_every', metavar='N', type=int, default=100, help='Cycle dataset')
 
 ex.add_config(vars(parser.parse_args()))
 
@@ -93,18 +94,18 @@ def main(_run):
 
         all_vars = [v for v in tf.trainable_variables() if 'model' in v.name]
         train_vars = [v for v in all_vars if '/h' in v.name] if args.only_train_transformer_layers else all_vars
+        opt = tf.train.AdamOptimizer(learning_rate=args.learning_rate)
         if args.accumulate_gradients > 1:
             if args.memory_saving_gradients:
                 exit("Memory saving gradients are not implemented for gradient accumulation yet.")
             opt = AccumulatingOptimizer(
-                opt=tf.train.AdamOptimizer(learning_rate=args.learning_rate),
+                opt=opt,
                 var_list=train_vars)
             opt_reset = opt.reset()
             opt_compute = opt.compute_gradients(loss)
             opt_apply = opt.apply_gradients()
             summary_loss = tf.summary.scalar('loss', opt_apply)
         else:
-            opt = tf.train.AdamOptimizer(learning_rate=args.learning_rate)
             if args.memory_saving_gradients:
                 opt_grads = memory_saving_gradients.gradients(loss, train_vars)
             else:
@@ -149,7 +150,7 @@ def main(_run):
             # Add 1 so we don't immediately try to save again
             with open(counter_path, 'r') as fp:
                 counter = int(fp.read()) + 1
-
+        start = counter - 1
         def save():
             maketree(os.path.join(CHECKPOINT_DIR, args.run_name))
             print(
@@ -217,7 +218,7 @@ def main(_run):
                     '[{counter} | {time:2.2f}] loss={loss:2.2f} avg={avg:2.2f}'
                     .format(
                         counter=counter,
-                        time=time.time() - start_time,
+                        time=(time.time() - start_time) / (counter - start),
                         loss=v_loss,
                         avg=avg_loss[0] / avg_loss[1]))
                 _run.log_scalar('loss', v_loss, counter)
