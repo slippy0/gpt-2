@@ -79,11 +79,17 @@ class Sampler(object):
         self.enc = enc
         self.combine = combine
         print('Loading perma dataset')
-        self.permchunks, _ = load_dataset(enc, data_paths(perm_path), combine)
+        if perm_path is None:
+            self.permchunks = []
+        else:
+            self.permchunks, _ = load_dataset(enc, data_paths(perm_path), combine)
         self.num_simultaneous_files = num_simultaneous_files
 
         print('Loading cycling dataset')
-        self.paths = data_paths(path)
+        if path is None:
+            self.paths = []
+        else:
+            self.paths = data_paths(path)
         self.chunks, self.chunkindices = load_dataset(enc, self.paths[:num_simultaneous_files], combine)
         self.cycleindex = 0
         print('Paths loaded:', self.paths[:num_simultaneous_files])
@@ -106,7 +112,6 @@ class Sampler(object):
 
         # unload first file
         del self.chunks[self.chunkindices[0][0]:self.chunkindices[0][-1]]
-
         del self.chunkindices[0]
         print('Unloaded file {}'.format(self.paths[self.cycleindex]))
 
