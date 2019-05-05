@@ -221,6 +221,9 @@ def main(_run):
                         loss=v_loss,
                         avg=avg_loss[0] / avg_loss[1]))
                 _run.log_scalar('loss', v_loss, counter)
+
+                if counter % args.cycle_every == 0:
+                    data_sampler.cycle_files()
                 counter += 1
         except KeyboardInterrupt:
             print('interrupted')
