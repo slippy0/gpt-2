@@ -1,7 +1,6 @@
 import glob
 import numpy as np
 import os
-import random
 import tensorflow as tf
 import tqdm
 
@@ -75,7 +74,7 @@ class Sampler(object):
     'Fairly' means that the distribution is the same as sampling from one concatenated chunk,
     but without crossing chunk boundaries."""
 
-    def __init__(self, enc, combine, path, perm_path, num_simultaneous_files=5):
+    def __init__(self, enc, combine, path, perm_path, num_simultaneous_files=5, seed=None):
         self.enc = enc
         self.combine = combine
         print('Loading perma dataset')
@@ -91,6 +90,8 @@ class Sampler(object):
         else:
             self.paths = data_paths(path)
 
+        self.seed = seed
+
         random.shuffle(self.paths)
         self.chunks, self.chunkindices = load_dataset(enc, self.paths[:num_simultaneous_files], combine)
         self.cycleindex = 0
@@ -105,6 +106,7 @@ class Sampler(object):
         self.boundaries = [0]
         for i in range(len(chunks)):
             self.boundaries.append(self.boundaries[-1] + chunks[i].shape[0])
+        self.rs = np.random.RandomState(seed=self.seed)
 
     def cycle_files(self):
         if len(self.paths) - len(self.chunkindices) == 0:
@@ -144,7 +146,7 @@ class Sampler(object):
         ), "Dataset files are too small to sample {} tokens at a time".format(
             length)
         while True:
-            index = random.randint(0, self.total_size - length - 1)
+            index = self.rs.randint(0, self.total_size - length - 1)
             i = binary_search(lambda j: self.boundaries[j] > index, 0,
                               len(self.boundaries) - 1) - 1
             if self.boundaries[i + 1] > index + length:

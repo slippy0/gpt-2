@@ -8,6 +8,7 @@ import os
 import numpy as np
 import tensorflow as tf
 import time
+import tqdm
 from tensorflow.core.protobuf import rewriter_config_pb2
 from sacred import Experiment
 from sacred.observers import MongoObserver
@@ -37,12 +38,17 @@ parser.add_argument('--combine', metavar='CHARS', type=int, default=50000, help=
 parser.add_argument('--num_cycle_files', metavar='N', type=int, default=50, help='Number of files to cycle')
 
 parser.add_argument('--batch_size', metavar='SIZE', type=int, default=1, help='Batch size')
-parser.add_argument('--learning_rate', metavar='LR', type=float, default=0.0001, help='Learning rate for Adam')
+
+parser.add_argument('--learning_rate', metavar='LR', type=float, default=0.00002, help='Learning rate for Adam')
 parser.add_argument('--grad_clip', metavar='N', type=float, default=1, help='Gradient clip')
 parser.add_argument('--accumulate_gradients', metavar='N', type=int, default=1, help='Accumulate gradients across N minibatches.')
 parser.add_argument('--memory_saving_gradients', default=False, action='store_true', help='Use gradient checkpointing to reduce vram usage.')
 parser.add_argument('--only_train_transformer_layers', default=False, action='store_true', help='Restrict training to the transformer blocks.')
-parser.add_argument('--sgd', default=False, action='store_true', help='Use SGD instead of Adam. ')
+parser.add_argument('--optimizer', type=str, default='adam', help='Optimizer. <adam|sgd>.')
+parser.add_argument('--noise', type=float, default=0.0, help='Add noise to input training data to regularize against typos.')
+
+parser.add_argument('--top_k', type=int, default=40, help='K for top-k sampling.')
+parser.add_argument('--top_p', type=float, default=0.0, help='P for top-p sampling. Overrides top_k if set > 0.')
 
 parser.add_argument('--restore_from', type=str, default='latest', help='Either "latest", "fresh", or a path to a checkpoint file')
 parser.add_argument('--run_name', type=str, default='run1', help='Run id. Name of subdirectory in checkpoint/ and samples/')
@@ -52,13 +58,28 @@ parser.add_argument('--sample_num', metavar='N', type=int, default=1, help='Gene
 parser.add_argument('--save_every', metavar='N', type=int, default=1000, help='Write a checkpoint every N steps')
 parser.add_argument('--cycle_every', metavar='N', type=int, default=100, help='Cycle dataset')
 
+parser.add_argument('--val_dataset', metavar='PATH', type=str, default=None, help='Dataset for validation loss, defaults to --dataset.')
+parser.add_argument('--val_batch_size', metavar='SIZE', type=int, default=2, help='Batch size for validation.')
+parser.add_argument('--val_batch_count', metavar='N', type=int, default=40, help='Number of batches for validation.')
+parser.add_argument('--val_every', metavar='STEPS', type=int, default=0, help='Calculate validation loss every STEPS steps.')
+
 ex.add_config(vars(parser.parse_args()))
+
 
 def maketree(path):
     try:
         os.makedirs(path)
     except:
         pass
+
+
+def randomize(context, hparams, p):
+    if p > 0:
+        mask = tf.random.uniform(shape=tf.shape(context)) < p
+        noise = tf.random.uniform(shape=tf.shape(context), minval=0, maxval=hparams.n_vocab, dtype=tf.int32)
+        return tf.where(mask, noise, context)
+    else:
+        return context
 
 
 @ex.main
@@ -75,7 +96,7 @@ def main(_run):
 
     if args.model_name == '345M':
         args.memory_saving_gradients = True
-        if not args.sgd and not args.only_train_transformer_layers:
+        if args.optimizer == 'adam' and not args.only_train_transformer_layers:
             print('WARNING: cannot use adam and still train embeddings on 1080ti!')
 
     config = tf.ConfigProto()
@@ -83,10 +104,20 @@ def main(_run):
     config.graph_options.rewrite_options.layout_optimizer = rewriter_config_pb2.RewriterConfig.OFF
     with tf.Session(config=config) as sess:
         context = tf.placeholder(tf.int32, [args.batch_size, None])
-        output = model.model(hparams=hparams, X=context)
+        context_in = randomize(context, hparams, args.noise)
+        output = model.model(hparams=hparams, X=context_in)
         loss = tf.reduce_mean(
             tf.nn.sparse_softmax_cross_entropy_with_logits(
                 labels=context[:, 1:], logits=output['logits'][:, :-1]))
+
+        if args.val_every > 0:
+            val_context = tf.placeholder(tf.int32, [args.val_batch_size, None])
+            val_output = model.model(hparams=hparams, X=val_context)
+            val_loss = tf.reduce_mean(
+                tf.nn.sparse_softmax_cross_entropy_with_logits(
+                    labels=val_context[:, 1:], logits=val_output['logits'][:, :-1]))
+            val_loss_summary = tf.summary.scalar('val_loss', val_loss)
+
 
         tf_sample = sample.sample_sequence(
             hparams=hparams,
@@ -94,14 +125,18 @@ def main(_run):
             context=context,
             batch_size=args.batch_size,
             temperature=1.0,
-            top_k=40)
+            top_k=args.top_k,
+            top_p=args.top_p)
 
         all_vars = [v for v in tf.trainable_variables() if 'model' in v.name]
         train_vars = [v for v in all_vars if '/h' in v.name] if args.only_train_transformer_layers else all_vars
-        if args.sgd:
-            opt = tf.train.MomentumOptimizer(learning_rate=args.learning_rate, momentum=0.95)
-        else:
+
+        if args.optimizer == 'adam':
             opt = tf.train.AdamOptimizer(learning_rate=args.learning_rate)
+        elif args.optimizer == 'sgd':
+            opt = tf.train.GradientDescentOptimizer(learning_rate=args.learning_rate)
+        else:
+            exit('Bad optimizer:', args.optimizer)
 
         if args.accumulate_gradients > 1:
             opt = AccumulatingOptimizer(
@@ -122,6 +157,9 @@ def main(_run):
 
             opt_apply = opt.apply_gradients(opt_grads)
             summary_loss = tf.summary.scalar('loss', loss)
+
+        summary_lr = tf.summary.scalar('learning_rate', args.learning_rate)
+        summaries = tf.summary.merge([summary_lr, summary_loss])
 
         summary_log = tf.summary.FileWriter(
             os.path.join(CHECKPOINT_DIR, args.run_name))
@@ -149,8 +187,17 @@ def main(_run):
 
         print('Loading dataset...')
         data_sampler = Sampler(enc, args.combine, args.dataset, args.perm_dataset, args.num_cycle_files)
+        if args.val_every > 0:
+            val_chunks = load_dataset(enc, args.val_dataset, args.combine) if args.val_dataset else chunks
         print('dataset has', data_sampler.total_size, 'tokens')
         print('Training...')
+
+        if args.val_every > 0:
+            # Sample from validation set once with fixed seed to make
+            # it deterministic during training as well as across runs.
+            val_data_sampler = Sampler(val_chunks, seed=1)
+            val_batches = [[val_data_sampler.sample(1024) for _ in range(args.val_batch_size)]
+                           for _ in range(args.val_batch_count)]
 
         counter = 1
         counter_path = os.path.join(CHECKPOINT_DIR, args.run_name, 'counter')
@@ -174,6 +221,7 @@ def main(_run):
                 fp.write(str(counter) + '\n')
 
         def generate_samples():
+            print('Generating samples...')
             context_tokens = data_sampler.sample(1)
             all_text = []
             index = 0
@@ -194,8 +242,25 @@ def main(_run):
                                  'samples-{}').format(counter), 'w') as fp:
                 fp.write('\n'.join(all_text))
 
+        def validation():
+            print('Calculating validation loss...')
+            losses = []
+            for batch in tqdm.tqdm(val_batches):
+                losses.append(sess.run(val_loss, feed_dict={val_context: batch}))
+            v_val_loss = np.mean(losses)
+            v_summary = sess.run(val_loss_summary, feed_dict={val_loss: v_val_loss})
+            summary_log.add_summary(v_summary, counter)
+            summary_log.flush()
+            print(
+                '[{counter} | {time:2.2f}] validation loss = {loss:2.2f}'
+                .format(
+                    counter=counter,
+                    time=time.time() - start_time,
+                    loss=v_val_loss))
+
         def sample_batch():
             return [data_sampler.sample(1024) for _ in range(args.batch_size)]
+
 
         avg_loss = (0.0, 0.0)
         start_time = time.time()
@@ -206,6 +271,8 @@ def main(_run):
                     save()
                 if counter % args.sample_every == 0:
                     generate_samples()
+                if args.val_every > 0 and (counter % args.val_every == 0 or counter == 1):
+                    validation()
 
                 if args.accumulate_gradients > 1:
                     sess.run(opt_reset)
