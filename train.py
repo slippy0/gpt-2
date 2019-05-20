@@ -34,12 +34,15 @@ parser.add_argument('--dataset', metavar='PATH', type=str, required=False, help=
 parser.add_argument('--perm_dataset', metavar='PATH', type=str, required=False, help='Non-cycled input data. Input file, directory, or glob pattern (utf-8 text, or preencoded .npz files).')
 parser.add_argument('--model_name', metavar='MODEL', type=str, default='117M', help='Pretrained model name')
 parser.add_argument('--combine', metavar='CHARS', type=int, default=50000, help='Concatenate input files with <|endoftext|> separator into chunks of this minimum size')
+parser.add_argument('--num_cycle_files', metavar='N', type=int, default=50, help='Number of files to cycle')
 
 parser.add_argument('--batch_size', metavar='SIZE', type=int, default=1, help='Batch size')
 parser.add_argument('--learning_rate', metavar='LR', type=float, default=0.0001, help='Learning rate for Adam')
+parser.add_argument('--grad_clip', metavar='N', type=float, default=1, help='Gradient clip')
 parser.add_argument('--accumulate_gradients', metavar='N', type=int, default=1, help='Accumulate gradients across N minibatches.')
 parser.add_argument('--memory_saving_gradients', default=False, action='store_true', help='Use gradient checkpointing to reduce vram usage.')
 parser.add_argument('--only_train_transformer_layers', default=False, action='store_true', help='Restrict training to the transformer blocks.')
+parser.add_argument('--sgd', default=False, action='store_true', help='Use SGD instead of Adam. ')
 
 parser.add_argument('--restore_from', type=str, default='latest', help='Either "latest", "fresh", or a path to a checkpoint file')
 parser.add_argument('--run_name', type=str, default='run1', help='Run id. Name of subdirectory in checkpoint/ and samples/')
@@ -72,7 +75,8 @@ def main(_run):
 
     if args.model_name == '345M':
         args.memory_saving_gradients = True
-        args.only_train_transformer_layers = True
+        if not args.sgd and not args.only_train_transformer_layers:
+            print('WARNING: cannot use adam and still train embeddings on 1080ti!')
 
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
@@ -94,16 +98,18 @@ def main(_run):
 
         all_vars = [v for v in tf.trainable_variables() if 'model' in v.name]
         train_vars = [v for v in all_vars if '/h' in v.name] if args.only_train_transformer_layers else all_vars
-        opt = tf.train.AdamOptimizer(learning_rate=args.learning_rate)
+        if args.sgd:
+            opt = tf.train.MomentumOptimizer(learning_rate=args.learning_rate, momentum=0.95)
+        else:
+            opt = tf.train.AdamOptimizer(learning_rate=args.learning_rate)
+
         if args.accumulate_gradients > 1:
-            if args.memory_saving_gradients:
-                exit("Memory saving gradients are not implemented for gradient accumulation yet.")
             opt = AccumulatingOptimizer(
                 opt=opt,
-                var_list=train_vars)
+                var_list=train_vars, memsavinggrads=args.memory_saving_gradients, grad_clip=args.grad_clip)
             opt_reset = opt.reset()
             opt_compute = opt.compute_gradients(loss)
-            opt_apply = opt.apply_gradients()
+            opt_apply, opt_norm = opt.apply_gradients()
             summary_loss = tf.summary.scalar('loss', opt_apply)
         else:
             if args.memory_saving_gradients:
@@ -142,7 +148,7 @@ def main(_run):
         saver.restore(sess, ckpt)
 
         print('Loading dataset...')
-        data_sampler = Sampler(enc, args.combine, args.dataset, args.perm_dataset)
+        data_sampler = Sampler(enc, args.combine, args.dataset, args.perm_dataset, args.num_cycle_files)
         print('dataset has', data_sampler.total_size, 'tokens')
         print('Training...')
 
@@ -206,10 +212,10 @@ def main(_run):
                     for _ in range(args.accumulate_gradients):
                         sess.run(
                             opt_compute, feed_dict={context: sample_batch()})
-                    (v_loss, v_summary) = sess.run((opt_apply, summary_loss))
+                    (v_loss, v_summary, v_norm) = sess.run((opt_apply, summary_loss, opt_norm))
                 else:
-                    (_, v_loss, v_summary) = sess.run(
-                        (opt_apply, loss, summary_loss),
+                    (_, v_loss, v_summary, v_norm) = sess.run(
+                        (opt_apply, loss, summary_loss, opt_norm),
                         feed_dict={context: sample_batch()})
 
                 summary_log.add_summary(v_summary, counter)
@@ -225,6 +231,7 @@ def main(_run):
                         loss=v_loss,
                         avg=avg_loss[0] / avg_loss[1]))
                 _run.log_scalar('loss', v_loss, counter)
+                _run.log_scalar('gradnorm', v_norm, counter)
 
                 if counter % args.cycle_every == 0:
                     data_sampler.cycle_files()

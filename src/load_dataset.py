@@ -27,7 +27,7 @@ def load_dataset(enc, paths, combine):
     indices = []
     raw_text = ''
     i = 0
-    for path in tqdm.tqdm(paths):
+    for path in tqdm.tqdm(paths, disable=len(paths) == 1):
         indices.append([])
         if path.endswith('.npz'):
             # Pre-encoded
@@ -90,6 +90,8 @@ class Sampler(object):
             self.paths = []
         else:
             self.paths = data_paths(path)
+
+        random.shuffle(self.paths)
         self.chunks, self.chunkindices = load_dataset(enc, self.paths[:num_simultaneous_files], combine)
         self.cycleindex = 0
         print('Paths loaded:', self.paths[:num_simultaneous_files])
@@ -110,16 +112,23 @@ class Sampler(object):
             return
         self.chunks = self.chunks[:self.chunkindices[-1][-1]]
 
+        assert self.chunkindices[0][0] == 0
         # unload first file
-        del self.chunks[self.chunkindices[0][0]:self.chunkindices[0][-1]]
+        del self.chunks[:self.chunkindices[0][-1]]
         del self.chunkindices[0]
-        print('Unloaded file {}'.format(self.paths[self.cycleindex]))
+        # shift indices
+        newdelta = self.chunkindices[0][0]
+        self.chunkindices = [[y - newdelta for y in x] for x in self.chunkindices]
+
+        assert self.chunkindices[0][0] == 0
+        assert len(self.chunkindices) == 1 or self.chunkindices[1][0] == self.chunkindices[0][-1] + 1
+#        print('Unloaded file {}'.format(self.paths[self.cycleindex]))
 
         sidx = self.cycleindex + len(self.chunkindices) + 1
 
         sidx %= len(self.paths)
 
-        print('Loading file {}'.format(self.paths[sidx]))
+#        print('Loading file {}'.format(self.paths[sidx]))
         nc, ncis = load_dataset(self.enc, [self.paths[sidx]], self.combine)
 
         self.chunks.extend(nc)
