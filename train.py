@@ -110,7 +110,10 @@ def main(_run):
                 opt_grads = memory_saving_gradients.gradients(loss, train_vars)
             else:
                 opt_grads = tf.gradients(loss, train_vars)
+
+            opt_grads, opt_norm = tf.clip_by_global_norm(opt_grads, args.grad_clip)
             opt_grads = list(zip(opt_grads, train_vars))
+
             opt_apply = opt.apply_gradients(opt_grads)
             summary_loss = tf.summary.scalar('loss', loss)
 
