@@ -3,6 +3,7 @@ import numpy as np
 import os
 import tensorflow as tf
 import tqdm
+import random
 
 
 def data_paths(path):
@@ -31,23 +32,26 @@ def load_dataset(enc, paths, combine):
         if path.endswith('.npz'):
             # Pre-encoded
             with np.load(path) as npz:
+                indices[-1].append(i)
                 for item in npz.files:
                     token_chunks.append(npz[item])
-                    indices[-1].append(i)
                     i += 1
+                indices[-1].append(i - 1)
+
         else:
             # Plain text
+            indices[-1].append(i)
             with open(path, 'r') as fp:
                 raw_text += fp.read()
             if len(raw_text) >= combine:
                 tokens = np.stack(enc.encode(raw_text))
                 token_chunks.append(tokens)
-                indices[-1].append(i)
                 i += 1
 
                 raw_text = ''
             else:
                 raw_text += '<|endoftext|>'
+            indices[-1].append(i - 1)
     if raw_text:
         tokens = np.stack(enc.encode(raw_text))
         token_chunks.append(tokens)
@@ -74,26 +78,28 @@ class Sampler(object):
     'Fairly' means that the distribution is the same as sampling from one concatenated chunk,
     but without crossing chunk boundaries."""
 
-    def __init__(self, enc, combine, path, perm_path, num_simultaneous_files=5, seed=None):
+    def __init__(self, enc, combine, path, perm_path, num_simultaneous_files=5, seed=None, dataset_loader=load_dataset, arr_paths=False, shuffle=True):
+        self.load_dataset = dataset_loader
         self.enc = enc
         self.combine = combine
         print('Loading perma dataset')
         if perm_path is None:
             self.permchunks = []
         else:
-            self.permchunks, _ = load_dataset(enc, data_paths(perm_path), combine)
+            self.permchunks, _ = self.load_dataset(enc, perm_path if arr_paths else data_paths(perm_path), combine)
         self.num_simultaneous_files = num_simultaneous_files
 
         print('Loading cycling dataset')
         if path is None:
             self.paths = []
         else:
-            self.paths = data_paths(path)
+            self.paths = path if arr_paths else data_paths(path)
 
         self.seed = seed
 
-        random.shuffle(self.paths)
-        self.chunks, self.chunkindices = load_dataset(enc, self.paths[:num_simultaneous_files], combine)
+        if shuffle:
+            random.shuffle(self.paths)
+        self.chunks, self.chunkindices = self.load_dataset(enc, self.paths[:num_simultaneous_files], combine)
         self.cycleindex = 0
         print('Paths loaded:', self.paths[:num_simultaneous_files])
 
@@ -112,18 +118,18 @@ class Sampler(object):
         if len(self.paths) - len(self.chunkindices) == 0:
             # can't cycle :(
             return
-        self.chunks = self.chunks[:self.chunkindices[-1][-1]]
+        self.chunks = self.chunks[:self.chunkindices[-1][-1] + 1]
 
-        assert self.chunkindices[0][0] == 0
+#        assert self.chunkindices[0][0] == 0
         # unload first file
-        del self.chunks[:self.chunkindices[0][-1]]
+        del self.chunks[:self.chunkindices[0][-1] + 1]
         del self.chunkindices[0]
         # shift indices
         newdelta = self.chunkindices[0][0]
         self.chunkindices = [[y - newdelta for y in x] for x in self.chunkindices]
 
-        assert self.chunkindices[0][0] == 0
-        assert len(self.chunkindices) == 1 or self.chunkindices[1][0] == self.chunkindices[0][-1] + 1
+#        assert self.chunkindices[0][0] == 0
+#        assert len(self.chunkindices) == 1 or self.chunkindices[1][0] == self.chunkindices[0][-1] + 1
 #        print('Unloaded file {}'.format(self.paths[self.cycleindex]))
 
         sidx = self.cycleindex + len(self.chunkindices) + 1
@@ -131,10 +137,10 @@ class Sampler(object):
         sidx %= len(self.paths)
 
 #        print('Loading file {}'.format(self.paths[sidx]))
-        nc, ncis = load_dataset(self.enc, [self.paths[sidx]], self.combine)
+        nc, ncis = self.load_dataset(self.enc, [self.paths[sidx]], self.combine)
 
         self.chunks.extend(nc)
-        self.chunkindices.extend(ncis)
+        self.chunkindices.extend([[y + self.chunkindices[-1][-1] + 1 for y in x] for x in ncis])
 
         self.cycleindex += 1
         self.cycleindex %= len(self.paths)
