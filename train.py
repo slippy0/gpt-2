@@ -20,7 +20,7 @@ import memory_saving_gradients
 
 ex = Experiment('gpt2-345M-finetune-tf')
 
-ex.observers.append(MongoObserver.create(url='localhost:27017', db_name='experiments'))
+#ex.observers.append(MongoObserver.create(url='localhost:27017', db_name='experiments'))
 
 
 CHECKPOINT_DIR = 'checkpoint'
