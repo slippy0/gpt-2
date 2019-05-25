@@ -27,6 +27,9 @@ def load_dataset(enc, paths, combine):
     indices = []
     raw_text = ''
     i = 0
+    if isinstance(paths, str):
+        paths =  data_paths(paths)
+
     for path in tqdm.tqdm(paths, disable=len(paths) == 1):
         indices.append([])
         if path.endswith('.npz'):
