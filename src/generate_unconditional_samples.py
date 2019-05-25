@@ -62,6 +62,7 @@ def sample_model(
 
         saver = tf.train.Saver()
         ckpt = tf.train.latest_checkpoint(os.path.join('models', model_name))
+        print("Loading checkpoint from: " + ckpt)
         saver.restore(sess, ckpt)
 
         generated = 0
