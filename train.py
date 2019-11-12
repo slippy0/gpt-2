@@ -85,7 +85,7 @@ def main():
         raise ValueError(
             "Can't get samples longer than window size: %s" % hparams.n_ctx)
 
-    if args.model_name == '345M':
+    if args.model_name != '117M':
         args.memory_saving_gradients = True
         if args.optimizer == 'adam' and not args.only_train_transformer_layers:
             print('WARNING: cannot use adam and still train embeddings on 1080ti!')
