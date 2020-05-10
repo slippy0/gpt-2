@@ -51,6 +51,8 @@ parser.add_argument('--sample_length', metavar='TOKENS', type=int, default=1023,
 parser.add_argument('--sample_num', metavar='N', type=int, default=1, help='Generate this many samples')
 parser.add_argument('--save_every', metavar='N', type=int, default=1000, help='Write a checkpoint every N steps')
 parser.add_argument('--cycle_every', metavar='N', type=int, default=100, help='Cycle dataset')
+parser.add_argument('--train_for', metavar='N', type=int, default=0, help='max number of iterations to train for.')
+
 
 parser.add_argument('--val_dataset', metavar='PATH', type=str, default=None, help='Dataset for validation loss, defaults to --dataset.')
 parser.add_argument('--val_batch_size', metavar='SIZE', type=int, default=2, help='Batch size for validation.')
@@ -264,7 +266,10 @@ def main():
                     generate_samples()
                 if args.val_every > 0 and (counter % args.val_every == 0 or counter == 1):
                     validation()
-
+                if args.train_for and counter >= args.train_for:
+                    print("reached iteration limit! Shutting down...")
+                    save()
+                    break
                 if args.accumulate_gradients > 1:
                     sess.run(opt_reset)
                     for _ in range(args.accumulate_gradients):
